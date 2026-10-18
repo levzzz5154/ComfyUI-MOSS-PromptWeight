@@ -17,14 +17,52 @@ import comfy.patcher_extension
 from comfy.sd1_clip import escape_important, unescape_important
 from comfy.ldm.modules.attention import AttentionTensorContainer
 
-# the phrase may contain escaped parentheses, e.g. (oil painting \(medium\):2)
-WEIGHT_RE = re.compile(r"(?<!\\)\(((?:\\[()]|[^():\\])+):(-?\d*\.?\d+)\)")
+WEIGHT_RE = re.compile(r"-?\d*\.?\d+")
 KEY = "moss_prompt_weight"
 
 # GPT-2 byte-level BPE alphabet, built here because transformers 5 tokenizers no longer expose byte_decoder
 _printable = [*range(ord("!"), ord("~") + 1), *range(ord("¡"), ord("¬") + 1), *range(ord("®"), ord("ÿ") + 1)]
 BYTE_DECODER = {chr(b): b for b in _printable}
 BYTE_DECODER.update({chr(256 + i): b for i, b in enumerate(b for b in range(256) if b not in _printable)})
+
+
+def split_groups(text):
+    # top level text and balanced (...) groups, unmatched parentheses stay text, e.g. "smile :)"
+    out, depth, start = [], 0, 0
+    for i, c in enumerate(text):
+        if c == "(":
+            if depth == 0:
+                out.append(text[start:i])
+                start = i
+            depth += 1
+        elif c == ")" and depth:
+            depth -= 1
+            if depth == 0:
+                out.append(text[start:i + 1])
+                start = i + 1
+    if depth:
+        return out + ["("] + split_groups(text[start + 1:])
+    return out + [text[start:]]
+
+
+def strip_weights(text, terms):
+    # like ComfyUI's token_weights: weight after the last colon, so a phrase may hold colons and nested groups,
+    # e.g. JSON. Groups without a numeric weight stay literal text since the Qwen3.5 tokenizer keeps them.
+    out = ""
+    for x in split_groups(text):
+        if len(x) < 2 or x[0] != "(" or x[-1] != ")":
+            out += x
+            continue
+        phrase, sep, w = x[1:-1].rpartition(":")
+        if not phrase.strip() or not WEIGHT_RE.fullmatch(w.strip()):
+            out += "(" + strip_weights(x[1:-1], terms) + ")"
+            continue
+        i = len(terms)
+        terms.append(None)  # outer group first so nested weights override it
+        phrase = strip_weights(phrase, terms)
+        terms[i] = (unescape_important(phrase.strip()), float(w))
+        out += phrase
+    return out
 
 
 def common_prefix(a, b):
@@ -117,8 +155,8 @@ class MOSSImagePromptWeight:
     EXPERIMENTAL = True
 
     def encode(self, model, clip, text, strength, mapping="linear"):
-        terms = [(unescape_important(escape_important(m.group(1).strip())), float(m.group(2))) for m in WEIGHT_RE.finditer(text)]
-        tokens = clip.tokenize(WEIGHT_RE.sub(lambda m: m.group(1), text))
+        terms = []
+        tokens = clip.tokenize(unescape_important(strip_weights(escape_important(text), terms)))
         cond = clip.encode_from_tokens_scheduled(tokens)
         if not terms:
             return (model, cond)

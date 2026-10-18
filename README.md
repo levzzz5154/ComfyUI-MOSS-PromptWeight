@@ -23,6 +23,7 @@ a ginger cat wearing a (red hat:-1), a vase of (yellow flowers:1.5) in the backg
 
 - `(x:1.5)` boosts a phrase and `(x:0.5)` weakens it, by biasing how much attention its tokens get.
 - `(x:0)` mutes a phrase and `(x:-1)` subtracts it, by scaling its value vectors.
+- Like ComfyUI, the weight is the number after the last colon, so groups can nest and hold colons, e.g. a JSON chunk `({"caption":"hakurei reimu"}:2)`. Parentheses without a weight stay in the prompt as text, e.g. `girl (touhou)`; escape them only when the text itself ends in `:number)`, e.g. `\(12:30\)`.
 - `strength` multiplies the whole effect. Lower it if the image breaks up.
 - `mapping` controls how a positive weight becomes a bias:
   - `linear` (default, same as KJNodes' Krea2 node): `2 * (w - 1)`. Hits harder.
