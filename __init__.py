@@ -21,6 +21,11 @@ from comfy.ldm.modules.attention import AttentionTensorContainer
 WEIGHT_RE = re.compile(r"(?<!\\)\(((?:\\[()]|[^():\\])+):(-?\d*\.?\d+)\)")
 KEY = "moss_prompt_weight"
 
+# GPT-2 byte-level BPE alphabet, built here because transformers 5 tokenizers no longer expose byte_decoder
+_printable = [*range(ord("!"), ord("~") + 1), *range(ord("¡"), ord("¬") + 1), *range(ord("®"), ord("ÿ") + 1)]
+BYTE_DECODER = {chr(b): b for b in _printable}
+BYTE_DECODER.update({chr(256 + i): b for i, b in enumerate(b for b in range(256) if b not in _printable)})
+
 
 def common_prefix(a, b):
     n = 0
@@ -131,7 +136,7 @@ class MOSSImagePromptWeight:
         prompt, spans = "", []
         for t in hf.convert_ids_to_tokens(ids[start:end]):
             lo = len(prompt)
-            prompt += decoder.decode(bytes(hf.byte_decoder[c] for c in t))
+            prompt += decoder.decode(bytes(BYTE_DECODER[c] for c in t))
             spans.append((lo, max(len(prompt), lo + 1)))  # a token holding only part of a character still covers it
 
         bias, v_scale = {}, {}
