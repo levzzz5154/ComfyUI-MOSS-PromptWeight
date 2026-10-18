@@ -2,6 +2,17 @@
 
 Per-phrase prompt weighting for MOSS-Image in ComfyUI. The Qwen3.5 text encoder ignores ComfyUI's normal `(word:1.2)` weights, so this node applies them inside the diffusion model's attention instead.
 
+## Install
+
+Clone into `ComfyUI/custom_nodes` and restart ComfyUI:
+
+```
+cd ComfyUI/custom_nodes
+git clone https://github.com/levzzz5154/ComfyUI-MOSS-PromptWeight
+```
+
+No extra dependencies. Needs a ComfyUI version with MOSS-Image support.
+
 ## Usage
 
 Use **MOSS-Image Prompt Weight** (`conditioning/moss_image`) in place of CLIP Text Encode for the positive prompt, and use its `model` output for sampling.
