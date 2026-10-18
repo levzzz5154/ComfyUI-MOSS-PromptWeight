@@ -5,6 +5,7 @@
 #                token gets by exactly weight before the softmax renormalizes.
 #   weight <= 0: the token's value vector is scaled by weight instead (0 mutes it, -1 subtracts the concept).
 # Weights follow the conditioning tensor rather than being global, so the negative prompt is left alone and CFG works.
+import codecs
 import logging
 import math
 import re
@@ -13,9 +14,11 @@ import torch
 
 import comfy.ldm.modules.attention
 import comfy.patcher_extension
+from comfy.sd1_clip import escape_important, unescape_important
 from comfy.ldm.modules.attention import AttentionTensorContainer
 
-WEIGHT_RE = re.compile(r"\(([^():]+):(-?\d*\.?\d+)\)")
+# the phrase may contain escaped parentheses, e.g. (oil painting \(medium\):2)
+WEIGHT_RE = re.compile(r"(?<!\\)\(((?:\\[()]|[^():\\])+):(-?\d*\.?\d+)\)")
 KEY = "moss_prompt_weight"
 
 
@@ -24,10 +27,6 @@ def common_prefix(a, b):
     while n < min(len(a), len(b)) and a[n] == b[n]:
         n += 1
     return n
-
-
-def find_all(seq, sub, lo, hi):
-    return [i for i in range(lo, hi - len(sub) + 1) if seq[i:i + len(sub)] == sub]
 
 
 def apply_weights(k_len, v, kwargs, transformer_options):
@@ -113,7 +112,7 @@ class MOSSImagePromptWeight:
     EXPERIMENTAL = True
 
     def encode(self, model, clip, text, strength, mapping="linear"):
-        terms = [(m.group(1).strip(), float(m.group(2))) for m in WEIGHT_RE.finditer(text)]
+        terms = [(unescape_important(escape_important(m.group(1).strip())), float(m.group(2))) for m in WEIGHT_RE.finditer(text)]
         tokens = clip.tokenize(WEIGHT_RE.sub(lambda m: m.group(1), text))
         cond = clip.encode_from_tokens_scheduled(tokens)
         if not terms:
@@ -127,15 +126,18 @@ class MOSSImagePromptWeight:
         end = max(start, len(ids) - common_prefix(ids[::-1], empty[::-1]))
         offset = len(ids) - cond[0][0].shape[1]
         hf = getattr(clip.tokenizer, clip.tokenizer.clip).tokenizer
+        # match phrases on the decoded prompt text: in context BPE can merge a phrase's edge into a neighbour, e.g. "),"
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        prompt, spans = "", []
+        for t in hf.convert_ids_to_tokens(ids[start:end]):
+            lo = len(prompt)
+            prompt += decoder.decode(bytes(hf.byte_decoder[c] for c in t))
+            spans.append((lo, max(len(prompt), lo + 1)))  # a token holding only part of a character still covers it
 
         bias, v_scale = {}, {}
         for phrase, w in terms:
-            positions = []
-            for variant in (" " + phrase, phrase):  # mid-sentence words carry a leading space token
-                sub = hf(variant)["input_ids"]
-                positions = [i + j - offset for i in find_all(ids, sub, start, end) for j in range(len(sub))]
-                if positions:
-                    break
+            matches = [(m.start(), m.end()) for m in re.finditer(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", prompt)]
+            positions = [start + i - offset for a, b in matches for i, (lo, hi) in enumerate(spans) if lo < b and hi > a]
             if not positions:
                 logging.warning(f"MOSSImagePromptWeight: '{phrase}' not found in the tokenized prompt, skipped.")
                 continue
