@@ -11,7 +11,9 @@ import re
 
 import torch
 
+import comfy.ldm.modules.attention
 import comfy.patcher_extension
+from comfy.ldm.modules.attention import AttentionTensorContainer
 
 WEIGHT_RE = re.compile(r"\(([^():]+):(-?\d*\.?\d+)\)")
 KEY = "moss_prompt_weight"
@@ -28,17 +30,35 @@ def find_all(seq, sub, lo, hi):
     return [i for i in range(lo, hi - len(sub) + 1) if seq[i:i + len(sub)] == sub]
 
 
-def weighted_attention(func, q, k, v, heads, *args, transformer_options={}, **kwargs):
+def apply_weights(k_len, v, kwargs, transformer_options):
     # text tokens are always the last L positions: the whole sequence in the text embedder, after the image in the blocks
-    bias, v_scale, prev = transformer_options[KEY]
-    n = k.shape[1]
+    bias, v_scale, _ = transformer_options[KEY]
     if v_scale is not None:
-        v = v * v_scale[:, -n:]
+        v = v * v_scale[:, -k_len:]
     if bias is not None:
-        kwargs["mask"] = bias[..., -n:]
-    if prev is not None:
-        return prev(func, q, k, v, heads, *args, transformer_options=transformer_options, **kwargs)
-    return func(q, k, v, heads, *args, transformer_options=transformer_options, **kwargs)
+        kwargs["mask"] = bias[..., -k_len:]
+    return v
+
+
+def weighted_attention(func, q, k, v, heads, *args, transformer_options={}, **kwargs):
+    # only used when another node already set an attention override, which then replaces the per-layer attention anyway
+    v = apply_weights(k.shape[1], v, kwargs, transformer_options)
+    prev = transformer_options[KEY][2]
+    return prev(func, q, k, v, heads, *args, transformer_options=transformer_options, **kwargs)
+
+
+class WeightedComfyAttention(comfy.ldm.modules.attention.ComfyAttention):
+    # replaces a layer's ComfyAttention so weighted steps still run the checkpoint's own kernel, e.g. int8 in _attn models
+    def __init__(self, orig):
+        super().__init__()
+        self.config = orig.config
+        self.orig = orig.function or comfy.ldm.modules.attention.optimized_attention
+        self.function = self.weighted
+
+    def weighted(self, q, k, v, heads, *args, transformer_options={}, **kwargs):
+        if KEY in transformer_options:
+            v = AttentionTensorContainer(apply_weights(k.peek().shape[1], v.take(), kwargs, transformer_options))
+        return self.orig(q, k, v, heads, *args, transformer_options=transformer_options, **kwargs)
 
 
 class PromptWeightWrapper:
@@ -68,7 +88,8 @@ class PromptWeightWrapper:
             mul[torch.tensor(rows, device=x.device)[:, None], torch.tensor([n - L + p for p in self.v_scale], device=x.device), 0] = torch.tensor(list(self.v_scale.values()), device=x.device, dtype=x.dtype)
             v_scale = mul if v_scale is None else v_scale * mul
         transformer_options[KEY] = (bias, v_scale, prev)
-        transformer_options["optimized_attention_override"] = weighted_attention
+        if prev is not None:
+            transformer_options["optimized_attention_override"] = weighted_attention
         return executor(x, timestep, context, transformer_options, **kwargs)
 
 
@@ -127,6 +148,12 @@ class MOSSImagePromptWeight:
             return (model, cond)
 
         model = model.clone()
+        for name, m in model.get_model_object("diffusion_model").named_modules():
+            if isinstance(m, comfy.ldm.modules.attention.ComfyAttention):
+                path = f"diffusion_model.{name}"
+                current = model.get_model_object(path)
+                if not isinstance(current, WeightedComfyAttention):
+                    model.add_object_patch(path, WeightedComfyAttention(current))
         model.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, KEY, PromptWeightWrapper(cond[0][0][0].cpu(), bias, v_scale))
         return (model, cond)
 

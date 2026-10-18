@@ -25,6 +25,6 @@ Same seed, left to right: baseline, `(yellow flowers:3)` log, `(yellow flowers:3
 ## Notes
 
 - If you edit the conditioning afterwards (averaging, zeroing, concatenating), the weights stop applying. Combining conditionings is fine.
-- Weighted steps use the global attention backend with a mask, not the per-layer attention setting stored in the checkpoint.
+- Weighted steps keep the attention kernel stored in the checkpoint (e.g. int8 in `_attn` models). If another node sets an attention override (Sage, Flash, ...), that one is used instead.
 
 Based on the approach of KJNodes' `Krea2PromptWeight`.
