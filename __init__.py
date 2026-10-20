@@ -7,16 +7,15 @@
 # Weights follow the conditioning tensor rather than being global, so the negative prompt is left alone and CFG works.
 import codecs
 import functools
-import logging
 import math
 import re
+import unicodedata
 
 import torch
 
 import comfy.ldm.modules.attention
 import comfy.patcher_extension
 from comfy.text_encoders.qwen35 import GatedAttention, GatedDeltaNet
-from comfy.sd1_clip import escape_important, unescape_important
 from comfy.ldm.modules.attention import AttentionTensorContainer
 
 WEIGHT_RE = re.compile(r"-?\d*\.?\d+")
@@ -47,9 +46,19 @@ def split_groups(text):
     return out + [text[start:]]
 
 
-def strip_weights(text, terms):
+def escape(text):
+    # one character placeholders, so positions in the stripped text don't move when they are unescaped
+    return text.replace("\\(", "\1").replace("\\)", "\2")
+
+
+def unescape(text):
+    return text.replace("\1", "(").replace("\2", ")")
+
+
+def strip_weights(text, terms, base=0):
     # like ComfyUI's token_weights: weight after the last colon, so a phrase may hold colons and nested groups,
     # e.g. JSON. Groups without a numeric weight stay literal text since the Qwen3.5 tokenizer keeps them.
+    # Each weighted phrase is recorded as (start, end, weight), its character span in the stripped text.
     out = ""
     for x in split_groups(text):
         if len(x) < 2 or x[0] != "(" or x[-1] != ")":
@@ -57,12 +66,13 @@ def strip_weights(text, terms):
             continue
         phrase, sep, w = x[1:-1].rpartition(":")
         if not phrase.strip() or not WEIGHT_RE.fullmatch(w.strip()):
-            out += "(" + strip_weights(x[1:-1], terms) + ")"
+            out += "(" + strip_weights(x[1:-1], terms, base + len(out) + 1) + ")"
             continue
         i = len(terms)
         terms.append(None)  # outer group first so nested weights override it
-        phrase = strip_weights(phrase, terms)
-        terms[i] = (unescape_important(phrase.strip()), float(w))
+        a = base + len(out)
+        phrase = strip_weights(phrase, terms, a)
+        terms[i] = (a + len(phrase) - len(phrase.lstrip()), a + len(phrase.rstrip()), float(w))
         out += phrase
     return out
 
@@ -198,7 +208,9 @@ class MOSSImagePromptWeight:
 
     def encode(self, model, clip, text, strength, mapping="linear", encoder=True):
         terms = []
-        tokens = clip.tokenize(unescape_important(strip_weights(escape_important(text), terms)))
+        # NFC first like the tokenizer, so the phrase spans line up with the decoded tokens
+        text = unescape(strip_weights(escape(unicodedata.normalize("NFC", text)), terms))
+        tokens = clip.tokenize(text)
         if not terms:
             return (model, clip.encode_from_tokens_scheduled(tokens))
 
@@ -209,7 +221,7 @@ class MOSSImagePromptWeight:
         start = common_prefix(ids, empty)
         end = max(start, len(ids) - common_prefix(ids[::-1], empty[::-1]))
         hf = getattr(clip.tokenizer, clip.tokenizer.clip).tokenizer
-        # match phrases on the decoded prompt text: in context BPE can merge a phrase's edge into a neighbour, e.g. "),"
+        # map phrase spans onto the decoded prompt tokens: in context BPE can merge a phrase's edge into a neighbour, e.g. "),"
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         prompt, spans = "", []
         for t in hf.convert_ids_to_tokens(ids[start:end]):
@@ -217,13 +229,10 @@ class MOSSImagePromptWeight:
             prompt += decoder.decode(bytes(BYTE_DECODER[c] for c in t))
             spans.append((lo, max(len(prompt), lo + 1)))  # a token holding only part of a character still covers it
 
+        shift = len(text) - len(text.lstrip())  # the tokenizer strips the prompt
         weights = {}  # token index: weight, nested groups come later and override their outer group
-        for phrase, w in terms:
-            matches = [(m.start(), m.end()) for m in re.finditer(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", prompt)]
-            positions = [start + i for a, b in matches for i, (lo, hi) in enumerate(spans) if lo < b and hi > a]
-            if not positions:
-                logging.warning(f"MOSSImagePromptWeight: '{phrase}' not found in the tokenized prompt, skipped.")
-            weights.update((p, w) for p in positions)
+        for a, b, w in terms:
+            weights.update((start + i, w) for i, (lo, hi) in enumerate(spans) if lo < b - shift and hi > a - shift)
         bias = {p: strength * (math.log(w) if mapping == "log" else 2.0 * (w - 1.0)) for p, w in weights.items() if w > 0}
         v_scale = {p: 1.0 + strength * (w - 1.0) for p, w in weights.items() if w <= 0}
         if not weights:
