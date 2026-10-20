@@ -229,10 +229,12 @@ class MOSSImagePromptWeight:
             prompt += decoder.decode(bytes(BYTE_DECODER[c] for c in t))
             spans.append((lo, max(len(prompt), lo + 1)))  # a token holding only part of a character still covers it
 
-        shift = len(text) - len(text.lstrip())  # the tokenizer strips the prompt
+        # the tokenizer strips the prompt, and a prompt with its own chat template keeps part of it before the prompt
+        shift = text.index(prompt)
         weights = {}  # token index: weight, nested groups come later and override their outer group
         for a, b, w in terms:
             weights.update((start + i, w) for i, (lo, hi) in enumerate(spans) if lo < b - shift and hi > a - shift)
+        weights = {p: w for p, w in weights.items() if w != 1.0}
         bias = {p: strength * (math.log(w) if mapping == "log" else 2.0 * (w - 1.0)) for p, w in weights.items() if w > 0}
         v_scale = {p: 1.0 + strength * (w - 1.0) for p, w in weights.items() if w <= 0}
         if not weights:
