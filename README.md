@@ -1,6 +1,6 @@
 # ComfyUI-MOSS-PromptWeight
 
-Per-phrase prompt weighting for MOSS-Image in ComfyUI. The Qwen3.5 text encoder ignores ComfyUI's normal `(word:1.2)` weights, so this node applies them inside the diffusion model's attention instead.
+Per-phrase prompt weighting for MOSS-Image in ComfyUI. The Qwen3.5 text encoder ignores ComfyUI's normal `(word:1.2)` weights, so this node applies them inside the attention of the diffusion model and the text encoder instead.
 
 ## Install
 
