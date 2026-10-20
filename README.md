@@ -28,6 +28,7 @@ a ginger cat wearing a (red hat:-1), a vase of (yellow flowers:1.5) in the backg
 - `mapping` controls how a positive weight becomes a bias:
   - `linear` (default, same as KJNodes' Krea2 node): `2 * (w - 1)`. Hits harder.
   - `log`: `log(w)`. `(x:2)` gets exactly 2x the attention.
+- `encoder` (default on) also applies the weights inside the Qwen3.5 text encoder. It is causal, so otherwise the words after a phrase carry it on unweighted: a muted phrase still reaches them at full strength. With `encoder` on, about 13% gets through. Negative weights mute the phrase in the encoder rather than subtract it.
 
 Weights apply only to the conditioning this node outputs, so CFG and the negative prompt work normally. To weight the negative prompt, chain a second node.
 
